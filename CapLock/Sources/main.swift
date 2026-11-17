@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import SwiftUI
 import ServiceManagement
@@ -12,8 +13,9 @@ enum P {
     static let offColor = "offColor"
     static let iconStyle = "iconStyle"
     static let iconSize = "iconSize"
-    static let showHUD = "showHUD"
-    static let hudDuration = "hudDuration"
+    static let showBadge = "showBadge"
+    static let showHUD = "showHUD"          // legacy key, migrated to showBadge
+    static let hudDuration = "hudDuration"  // kept for old preferences
     static let hudPosition = "hudPosition"
     static let playSound = "playSound"
     static let launchAtLogin = "launchAtLogin"
@@ -34,11 +36,25 @@ enum P {
         UserDefaults.standard.object(forKey: key) as? Int ?? def
     }
     static func registerDefaults() {
-        UserDefaults.standard.registerdefaults([
+        let defaults = UserDefaults.standard
+        // Users of the previous build may have disabled the old HUD. Carry that
+        // choice over to the new anchored indicator.
+        if defaults.object(forKey: P.showBadge) == nil,
+           let legacy = defaults.object(forKey: P.showHUD) as? Bool {
+            defaults.set(legacy, forKey: P.showBadge)
+        }
+        // v1.0 used tag 1 for "top center"; v1.1 uses tag 0 for the new
+        // anchored indicator, so reset the old choice once.
+        if defaults.object(forKey: "badgePositionMigrated") == nil {
+            defaults.set(0, forKey: P.hudPosition)
+            defaults.set(true, forKey: "badgePositionMigrated")
+        }
+        defaults.registerdefaults([
             P.onColor: P.defOnColor,
             P.offColor: P.defOffColor,
             P.iconStyle: 0,
             P.iconSize: 18.0,
+            P.showBadge: true,
             P.showHUD: true,
             P.hudDuration: 1.4,
             P.hudPosition: 0,
@@ -222,107 +238,221 @@ enum IconFactory {
     }
 }
 
-// MARK: - HUD near the text cursor
+// MARK: - Focused text box + anchored badge
 
-final class HUDView: NSView {
-    let active: Bool
+enum TextBoxLocator {
+    /// Roles that represent an editable text field in the Accessibility tree.
+    static let textRoles: Set<String> = [
+        "AXTextField", "AXTextArea", "AXSecureTextField", "AXSearchField",
+        "AXComboBox", "AXTextView", "AXText",
+    ]
 
-    init(active: Bool) {
-        self.active = active
-        super.init(frame: NSRect(x: 0, y: 0, width: 224, height: 64))
+    static var isTrusted: Bool { AXIsProcessTrusted() }
+
+    static func requestAccess() {
+        let key = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([key: true] as CFDictionary)
     }
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let accent = NSColor(hex: P.string(active ? P.onColor : P.offColor,
-                                           active ? P.defOnColor : P.defOffColor))
-        let bg = NSColor.windowBackgroundColor.withAlphaComponent(0.96)
-        let r = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 14, yRadius: 14)
-        bg.setFill(); r.fill()
-        accent.setStroke(); r.lineWidth = 2; r.stroke()
+    static func openPrivacySettings() {
+        guard let url = URL(string:
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+        else { return }
+        NSWorkspace.shared.open(url)
+    }
 
-        let title = active ? "CAPS LOCK AKTIF" : "CAPS LOCK NONAKTIF"
-        let font = NSFont.boldSystemFont(ofSize: 13)
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: accent]
-        let str = title as NSString
-        let tw = str.size(withAttributes: attrs).width
-        str.draw(at: NSPoint(x: (bounds.width - tw) / 2, y: 15), withAttributes: attrs)
+    static func frame(for element: AXUIElement) -> NSRect? {
+        var posRef: CFTypeRef?
+        var sizeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString,
+                                            &posRef) == .success,
+              AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString,
+                                            &sizeRef) == .success,
+              let posRef = posRef, let sizeRef = sizeRef else { return nil }
+        let posValue = posRef as! AXValue
+        let sizeValue = sizeRef as! AXValue
+        var point = CGPoint.zero
+        var size = CGSize.zero
+        guard AXValueGetValue(posValue, .cgPoint, &point),
+              AXValueGetValue(sizeValue, .cgSize, &size),
+              size.width >= 24, size.height >= 10 else { return nil }
+        return NSRect(x: point.x, y: point.y, width: size.width, height: size.height)
+    }
 
-        let sub = active ? "Huruf besar aktif saat mengetik" : "Ketikan kembali normal"
-        let f2 = NSFont.systemFont(ofSize: 10.5)
-        let a2: [NSAttributedString.Key: Any] = [.font: f2,
-                                                 .foregroundColor: NSColor.secondaryLabelColor]
-        let s2 = sub as NSString
-        let w2 = s2.size(withAttributes: a2).width
-        s2.draw(at: NSPoint(x: (bounds.width - w2) / 2, y: 36), withAttributes: a2)
+    /// Frame of the text field focused by the frontmost app.
+    ///
+    /// Accessibility coordinates use the top-left of the primary display as the
+    /// origin and increase downwards; AppKit windows use a bottom-left origin.
+    static func focusedTextFieldFrame() -> NSRect? {
+        guard isTrusted, let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(appElement,
+                                            kAXFocusedUIElementAttribute as CFString,
+                                            &focusedRef) == .success,
+              let focusedRef = focusedRef else { return nil }
+        let element = focusedRef as! AXUIElement
+
+        var roleRef: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        if let role = roleRef as? String, textRoles.contains(role) {
+            return frame(for: element)
+        }
+
+        // Some containers expose their real editor one level deeper.
+        var childRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element,
+                                            kAXFocusedUIElementAttribute as CFString,
+                                            &childRef) == .success,
+              let childRef = childRef else { return nil }
+        let child = childRef as! AXUIElement
+        var childRoleRef: CFTypeRef?
+        _ = AXUIElementCopyAttributeValue(child, kAXRoleAttribute as CFString, &childRoleRef)
+        guard let childRole = childRoleRef as? String, textRoles.contains(childRole) else {
+            return nil
+        }
+        return frame(for: child)
     }
 }
 
-final class HUDController {
-    static let shared = HUDController()
+/// Small pill drawn directly above the focused text field.
+final class BadgeView: NSView {
+    override func draw(_ dirtyRect: NSRect) {
+        let accent = NSColor(hex: P.string(P.onColor, P.defOnColor))
+        let body = NSBezierPath(roundedRect: NSRect(x: bounds.minX, y: bounds.minY + 5,
+                                                    width: bounds.width,
+                                                    height: bounds.height - 5),
+                                xRadius: 9, yRadius: 9)
+        accent.setFill(); body.fill()
+
+        // Pointer aimed at the text field below.
+        let pointer = NSBezierPath()
+        let mid = bounds.midX
+        pointer.move(to: NSPoint(x: mid - 5, y: 6))
+        pointer.line(to: NSPoint(x: mid + 5, y: 6))
+        pointer.line(to: NSPoint(x: mid, y: 0))
+        pointer.close()
+        accent.setFill(); pointer.fill()
+
+        let key = NSBezierPath(roundedRect: NSRect(x: 6, y: 11, width: 18, height: 14),
+                               xRadius: 4, yRadius: 4)
+        NSColor.white.setFill(); key.fill()
+        let letter = "A" as NSString
+        let letterFont = NSFont.boldSystemFont(ofSize: 11)
+        let letterAttrs: [NSAttributedString.Key: Any] = [
+            .font: letterFont, .foregroundColor: accent,
+        ]
+        let letterWidth = letter.size(withAttributes: letterAttrs).width
+        letter.draw(at: NSPoint(x: 6 + (18 - letterWidth) / 2, y: 13),
+                    withAttributes: letterAttrs)
+
+        let title = "CAPS LOCK AKTIF" as NSString
+        let font = NSFont.boldSystemFont(ofSize: 11)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font, .foregroundColor: NSColor.white,
+        ]
+        title.draw(at: NSPoint(x: 30, y: 13), withAttributes: attrs)
+    }
+}
+
+final class BadgeController {
+    static let shared = BadgeController()
     private var panel: NSPanel?
-    private var hideTimer: Timer?
+    private var previewTimer: Timer?
+    private let width: CGFloat = 168
+    private let height: CGFloat = 35
 
-    func show(active: Bool) {
-        guard P.bool(P.showHUD, true) else { return }
-        hide(animated: false)
-
-        let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 224, height: 64),
+    /// Keeps the badge in sync with Caps Lock and the currently focused field.
+    /// Safe to call on every polling tick; positioning is cheap.
+    func update(active: Bool) {
+        guard active else { hide(); return }
+        guard P.bool(P.showBadge, true) else { hide(); return }
+        if panel == nil {
+            let p = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
                             styleMask: [.borderless, .nonactivatingPanel],
                             backing: .buffered, defer: false)
-        panel.isOpaque = false
-        panel.backgroundColor = .clear
-        panel.hasShadow = true
-        panel.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
-        panel.contentView = HUDView(active: active)
-        panel.alphaValue = 0
-
-        let mouse = NSEvent.mouseLocation
-        let screen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-            ?? NSScreen.main ?? NSScreen.screens.first
-        let w: CGFloat = 224, h: CGFloat = 64
-        var x: CGFloat, y: CGFloat
-        if P.int(P.hudPosition, 0) == 0, let screen = screen {
-            // near the pointer / typing location
-            x = mouse.x + 20
-            y = screen.frame.maxY - (screen.frame.maxY - mouse.y) - 22 - h
-            x = min(max(x, screen.frame.minX + 8), screen.frame.maxX - w - 8)
-            y = min(max(y, screen.frame.minY + 8), screen.frame.maxY - h - 8)
-        } else if let screen = screen {
-            x = screen.frame.midX - w / 2
-            y = screen.frame.maxY - 92
-        } else {
-            x = 0; y = 0
+            p.isOpaque = false
+            p.backgroundColor = .clear
+            p.hasShadow = true
+            p.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
+            p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+            p.contentView = BadgeView()
+            p.alphaValue = 0
+            panel = p
         }
-        panel.setFrame(NSRect(x: x, y: y, width: w, height: h), display: true)
-        panel.orderFrontRegardless()
-        NSAnimationContext.runAnimationGroup { ctx in
-            ctx.duration = 0.15
-            panel.animator().alphaValue = 1
-        }
-        self.panel = panel
-
-        hideTimer = Timer.scheduledTimer(withTimeInterval: P.double(P.hudDuration, 1.4),
-                                         repeats: false) { [weak self] _ in
-            self?.hide(animated: true)
+        guard let panel = panel else { return }
+        place(panel)
+        if !panel.isVisible {
+            panel.orderFrontRegardless()
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0.12
+                panel.animator().alphaValue = 1
+            }
         }
     }
 
-    func hide(animated: Bool) {
-        hideTimer?.invalidate(); hideTimer = nil
+    private func place(_ panel: NSPanel) {
+        let gap: CGFloat = 8
+        let globalTop = NSScreen.screens.first?.frame.maxY ?? 0
+        let mouse = NSEvent.mouseLocation
+
+        // Mode 0: anchor above the focused text field (Accessibility API).
+        if P.int(P.hudPosition, 0) == 0,
+           let field = TextBoxLocator.focusedTextFieldFrame() {
+            let fieldMidCocoa = NSPoint(x: field.midX, y: globalTop - field.midY)
+            let screen = NSScreen.screens.first {
+                NSMouseInRect(fieldMidCocoa, $0.frame, false)
+            } ?? NSScreen.main ?? NSScreen.screens.first
+
+            // Top of the field, measured downward from the primary display top.
+            // In AppKit coordinates the badge bottom sits `gap` above that edge.
+            var y = globalTop - field.minY + gap
+            if let screen = screen, y + height > screen.frame.maxY - 4 {
+                // Not enough room above: flip below the field.
+                y = globalTop - field.maxY - gap - height
+            }
+            var x = field.midX - width / 2
+            if let screen = screen {
+                x = min(max(x, screen.frame.minX + 8),
+                        screen.frame.maxX - width - 8)
+                y = min(max(y, screen.frame.minY + 8),
+                        screen.frame.maxY - height - 8)
+            }
+            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+            return
+        }
+
+        // Fallback: follow the pointer when permission is missing or no field
+        // is focused. Also used when the user explicitly picks "near cursor".
+        if let screen = (NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
+                            ?? NSScreen.main ?? NSScreen.screens.first) {
+            let x = min(max(mouse.x + 18, screen.frame.minX + 8),
+                        screen.frame.maxX - width - 8)
+            let y = min(max(mouse.y - height - 18, screen.frame.minY + 8),
+                        screen.frame.maxY - height - 8)
+            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        }
+    }
+
+    func preview() {
+        update(active: true)
+        previewTimer?.invalidate()
+        previewTimer = Timer.scheduledTimer(withTimeInterval: 3, repeats: false) { [weak self] _ in
+            self?.hide()
+        }
+    }
+
+    func hide() {
+        previewTimer?.invalidate(); previewTimer = nil
         guard let panel = panel else { return }
         self.panel = nil
-        if animated {
-            NSAnimationContext.runAnimationGroup({ ctx in
-                ctx.duration = 0.22
-                panel.animator().alphaValue = 0
-            }, completionHandler: {
-                panel.orderOut(nil)
-            })
-        } else {
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            panel.animator().alphaValue = 0
+        }, completionHandler: {
             panel.orderOut(nil)
-        }
+        })
     }
 }
 
@@ -333,13 +463,13 @@ struct SettingsView: View {
     @AppStorage(P.offColor) private var offColor = P.defOffColor
     @AppStorage(P.iconStyle) private var style = 0
     @AppStorage(P.iconSize) private var size = 18.0
-    @AppStorage(P.showHUD) private var showHUD = true
-    @AppStorage(P.hudDuration) private var duration = 1.4
+    @AppStorage(P.showBadge) private var showBadge = true
     @AppStorage(P.hudPosition) private var position = 0
     @AppStorage(P.playSound) private var sound = true
     @AppStorage(P.launchAtLogin) private var login = false
 
     @State private var loginMessage = ""
+    @State private var trusted = TextBoxLocator.isTrusted
 
     var body: some View {
         Form {
@@ -362,20 +492,42 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Notifikasi dekat kursor") {
-                Toggle("Tampilkan HUD saat Caps Lock berubah", isOn: $showHUD)
-                Picker("Posisi HUD", selection: $position) {
-                    Text("Dekat kursor / tempat mengetik").tag(0)
-                    Text("Tengah atas layar").tag(1)
-                }
-                HStack {
-                    Text("Lama tampil")
-                    Slider(value: $duration, in: 0.5...4.0, step: 0.1)
-                    Text(String(format: "%.1f dtk", duration)).monospacedDigit().frame(width: 58)
+            Section("Indikator Caps Lock aktif") {
+                Toggle("Tampilkan saat Caps Lock aktif", isOn: $showBadge)
+                Picker("Posisi indikator", selection: $position) {
+                    Text("Tepat di atas text box yang fokus").tag(0)
+                    Text("Dekat kursor").tag(1)
                 }
                 Toggle("Bunyi suara saat berubah", isOn: $sound)
-                Button("Pratinjau HUD") {
-                    HUDController.shared.show(active: true)
+                Button("Pratinjau indikator") {
+                    BadgeController.shared.preview()
+                }
+
+                HStack {
+                    Image(systemName: trusted ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .foregroundColor(trusted ? .green : .orange)
+                    Text(trusted ? "Akses Accessibility: aktif"
+                                 : "Akses Accessibility: belum diberikan")
+                        .font(.caption)
+                    Spacer()
+                    Button("Perbarui") { trusted = TextBoxLocator.isTrusted }
+                        .controlSize(.small)
+                }
+                if !trusted {
+                    Text("Izinkan CapLock di Privacy & Security › Accessibility agar indikator bisa menempel tepat di atas text box. Tanpa izin, indikator mengikuti kursor.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                    HStack {
+                        Button("Minta Izin") {
+                            TextBoxLocator.requestAccess()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                                trusted = TextBoxLocator.isTrusted
+                            }
+                        }
+                        Button("Buka Pengaturan") {
+                            TextBoxLocator.openPrivacySettings()
+                        }
+                    }
                 }
             }
 
@@ -398,6 +550,7 @@ struct SettingsView: View {
         .formStyle(.grouped)
         .frame(width: 460, height: 520)
         .onAppear {
+            trusted = TextBoxLocator.isTrusted
             if #available(macOS 13.0, *) {
                 login = (SMAppService.mainApp.status == .enabled)
             }
@@ -441,7 +594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         status.isEnabled = false
         menu.addItem(status)
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Pratinjau notifikasi", action: #selector(previewHUD),
+        menu.addItem(NSMenuItem(title: "Pratinjau indikator", action: #selector(previewBadge),
                                 keyEquivalent: "p"))
         menu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings),
                                 keyEquivalent: ","))
@@ -470,6 +623,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let current = CapsReader.isOn()
         guard current != lastState else {
             pendingHits = 0
+            // Follow the focused text field while Caps Lock stays on.
+            BadgeController.shared.update(active: lastState)
             return
         }
         // Two consecutive reads avoid reacting to the brief "tentative" state
@@ -489,11 +644,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             ? "Caps Lock: AKTIF (huruf besar)"
             : "Caps Lock: nonaktif"
 
-        if announce && didInit {
-            HUDController.shared.show(active: lastState)
-            if P.bool(P.playSound, true) {
-                NSSound(named: NSSound.Name(lastState ? "Tink" : "Pop"))?.play()
-            }
+        if lastState {
+            BadgeController.shared.update(active: true)
+        } else {
+            BadgeController.shared.hide()
+        }
+        if announce && didInit, P.bool(P.playSound, true) {
+            NSSound(named: NSSound.Name(lastState ? "Tink" : "Pop"))?.play()
         }
         didInit = true
     }
@@ -517,8 +674,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
-    @objc private func previewHUD() {
-        HUDController.shared.show(active: lastState)
+    @objc private func previewBadge() {
+        BadgeController.shared.preview()
     }
 
     @objc private func quit() {

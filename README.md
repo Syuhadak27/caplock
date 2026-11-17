@@ -3,13 +3,14 @@
 [![macOS](https://img.shields.io/badge/macOS-13%2B%20Ventura-blue.svg)](https://developer.apple.com/macos/)
 [![Architecture](https://img.shields.io/badge/arch-Intel%20x86__64-orange.svg)](https://en.wikipedia.org/wiki/X86-64)
 [![Built with](https://img.shields.io/badge/built%20with-Swift%205.8-red.svg)](https://swift.org/)
-[![No permissions](https://img.shields.io/badge/permissions-none-brightgreen.svg)](#kenapa-tanpa-izin)
+[![Accessibility](https://img.shields.io/badge/permissions-accessibility%20opsional-blue.svg)](#izin-accessibility)
 
 Indikator **Caps Lock** untuk macOS Ventura ke atas yang tinggal duduk di menu bar dan
-menampilkan notifikasi kecil dekat kursor saat status berubah. Cocok untuk keyboard yang
-tidak punya lampu Caps Lock, atau kalau Anda sering mengetik dalam huruf besar tanpa sadar.
+menampilkan badge kecil **tepat di atas text box yang sedang fokus** saat Caps Lock aktif.
+Cocok untuk keyboard yang tidak punya lampu Caps Lock, atau kalau Anda sering mengetik dalam
+huruf besar tanpa sadar.
 
-<img width="420" alt="Ilustrasi ikon menu bar dan HUD" src="docs/preview.svg">
+<img width="420" alt="Ilustrasi ikon menu bar dan indikator di atas text box" src="docs/preview.svg">
 
 > Ikon default: tombol Caps Lock klasik dengan huruf **A**. Warna, gaya, dan ukuran bisa
 > diubah lewat Settings.
@@ -17,15 +18,16 @@ tidak punya lampu Caps Lock, atau kalau Anda sering mengetik dalam huruf besar t
 ## Fitur
 
 - **Status real-time di menu bar** — ikon berubah warna saat Caps Lock aktif.
-- **HUD dekat kursor** — notifikasi muncul di dekat tempat Anda mengetik, lalu hilang otomatis.
-- **Tanpa izin Accessibility / Input Monitoring** — status dibaca dari HID system, bukan dari keystroke.
+- **Indikator menempel di atas text box** — badge `CAPS LOCK AKTIF` mengikuti field teks yang sedang fokus, bukan sekadar mengambang di dekat kursor.
+- **Fallback dekat kursor** — dipakai jika izin Accessibility belum diberikan atau tidak ada text field yang fokus.
+- **Tanpa Input Monitoring** — status dibaca dari HID system, bukan dari keystroke yang Anda ketik.
 - **Settings lengkap**:
   - 3 gaya ikon: tombol klasik, huruf A saja, atau lingkaran
   - warna bebas untuk kondisi aktif dan nonaktif
   - ukuran ikon 14–24 pt
-  - posisi HUD: dekat kursor atau tengah atas layar
-  - lama tampil HUD 0,5–4 detik
+  - posisi indikator: di atas text box yang fokus atau dekat kursor
   - suara on/off saat status berubah
+  - status izin Accessibility + tombol untuk memintanya
   - jalankan otomatis saat login (macOS 13+)
 - **Menu bar only** — tidak muncul di Dock, tidak memunculkan jendela saat start.
 - Ringan: polling 120 ms, tanpa event tap, tanpa network.
@@ -37,7 +39,10 @@ tidak punya lampu Caps Lock, atau kalau Anda sering mengetik dalam huruf besar t
 1. Download **[CapLock.zip](CapLock.zip)** dari repo ini, lalu unzip.
 2. Tarik `CapLock.app` ke folder **Applications**.
 3. Buka dari Applications / Launchpad.
-4. Klik ikon di menu bar → **Settings…** untuk mengubah warna dan pengaturan lainnya.
+4. Klik ikon di menu bar → **Settings…** → **Indikator Caps Lock aktif**, lalu klik
+   **Minta Izin** atau **Buka Pengaturan** untuk mengizinkan Accessibility. Izin ini dipakai
+   supaya badge bisa menempel tepat di atas text box.
+5. Ubah warna, gaya ikon, dan opsi lainnya di Settings sesuai selera.
 
 Atau clone repo lalu pakai `CapLock.app` yang sudah ada di root:
 
@@ -76,21 +81,28 @@ Klik ikon di menu bar untuk membuka menu:
 ```
 Caps Lock: nonaktif
 ─────────────────────
-Pratinjau notifikasi
+Pratinjau indikator
 Settings…
 ─────────────────────
 Keluar CapLock
 ```
 
-Saat Caps Lock ditekan, HUD berisi `CAPS LOCK AKTIF` / `CAPS LOCK NONAKTIF` muncul dekat
-pointer mouse dan auto-hilang setelah durasi yang diatur.
+Saat Caps Lock aktif, badge `CAPS LOCK AKTIF` muncul tepat di atas text field yang sedang
+Anda pakai. Badge tetap tampil selama Caps Lock aktif dan otomatis berpindah saat Anda
+berpindah ke field lain. Saat Caps Lock dimatikan, badge langsung hilang.
 
-## Kenapa tanpa izin?
+## Izin Accessibility
 
-Banyak indikator Caps Lock memasang *event tap* dan meminta **Input Monitoring**. CapLock
-tidak melakukan itu. Ia sesekali memanggil `IOHIDGetModifierLockState` dari IOKit — sumber
-status yang sama dengan lampu fisik Caps Lock — sehingga tidak perlu izin khusus dan tidak
-membaca apa pun yang Anda ketik.
+Status Caps Lock sendiri **tidak butuh izin apa pun** — dibaca dari HID system via IOKit.
+Yang butuh izin hanyalah kemampuan mencari koordinat text field:
+
+1. Buka **Settings… → Indikator Caps Lock aktif**.
+2. Klik **Minta Izin** (atau **Buka Pengaturan** jika belum muncul prompt).
+3. Di **System Settings → Privacy & Security → Accessibility**, centang **CapLock**.
+4. Klik **Perbarui** di Settings untuk memastikan status berubah jadi “akses aktif”.
+
+Tanpa izin ini, CapLock tetap bekerja, tetapi badge mengikuti posisi kursor sebagai fallback.
+CapLock **tidak meminta Input Monitoring** dan tidak merekam apa pun yang Anda ketik.
 
 > Catatan: untuk keyboard dengan fitur “Caps Lock untuk ganti bahasa input”, macOS
 > kadang melaporkan status sesaat saat tombol ditekan. CapLock memakai dua pembacaan
@@ -116,7 +128,7 @@ membaca apa pun yang Anda ketik.
 | macOS | 13.0 Ventura ke atas (diuji di 13.7.8) |
 | CPU | Intel x86_64 (di Apple Silicon bisa jalan via Rosetta 2) |
 | Swift | 5.8+ |
-| Izin | Tidak ada |
+| Izin | Accessibility (opsional, untuk posisi text box); Input Monitoring tidak dipakai |
 
 ## Uninstall
 
@@ -131,6 +143,8 @@ membaca apa pun yang Anda ketik.
 | Ikon tidak muncul | Pastikan app berjalan (`pgrep -fl CapLock`); keluar lalu buka lagi |
 | “App cannot be opened” | `xattr -d com.apple.quarantine /Applications/CapLock.app` |
 | Auto-start gagal aktif | Pindahkan app ke `/Applications` dulu, lalu aktifkan lagi di Settings |
+| Badge tidak muncul di atas text box | Cek status Accessibility di Settings; centang CapLock lalu klik **Perbarui** |
+| Badge mengikuti kursor | Izin Accessibility belum aktif, atau belum ada text field yang fokus (default fallback) |
 | Status terasa telat | Durasi debounce ≈240 ms sengaja dipakai untuk menghindari kedip |
 
 ---
