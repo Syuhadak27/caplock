@@ -18,14 +18,14 @@ huruf besar tanpa sadar.
 ## Fitur
 
 - **Status real-time di menu bar** — ikon berubah warna saat Caps Lock aktif.
-- **Indikator menempel di atas text box** — badge `CAPS LOCK AKTIF` mengikuti field teks yang sedang fokus, bukan sekadar mengambang di dekat kursor.
-- **Fallback dekat kursor** — dipakai jika izin Accessibility belum diberikan atau tidak ada text field yang fokus.
+- **Indikator menempel di atas text box** — badge `CAPS LOCK AKTIF` terkunci di atas field teks yang sedang fokus.
+- **Tidak mengikuti kursor** — setelah menempel pada sebuah text box, badge tidak bergeser saat mouse digerakkan.
 - **Tanpa Input Monitoring** — status dibaca dari HID system, bukan dari keystroke yang Anda ketik.
 - **Settings lengkap**:
   - 3 gaya ikon: tombol klasik, huruf A saja, atau lingkaran
   - warna bebas untuk kondisi aktif dan nonaktif
   - ukuran ikon 14–24 pt
-  - posisi indikator: di atas text box yang fokus atau dekat kursor
+  - indikator selalu di atas text box yang fokus (tanpa opsi mengikuti kursor)
   - suara on/off saat status berubah
   - status izin Accessibility + tombol untuk memintanya
   - jalankan otomatis saat login (macOS 13+)
@@ -88,8 +88,9 @@ Keluar CapLock
 ```
 
 Saat Caps Lock aktif, badge `CAPS LOCK AKTIF` muncul tepat di atas text field yang sedang
-Anda pakai. Badge tetap tampil selama Caps Lock aktif dan otomatis berpindah saat Anda
-berpindah ke field lain. Saat Caps Lock dimatikan, badge langsung hilang.
+Anda pakai. Badge tetap tampil selama Caps Lock aktif dan otomatis berpindah hanya saat Anda
+berpindah ke field lain — menggerakkan mouse tidak memindahkannya. Saat Caps Lock dimatikan,
+badge langsung hilang.
 
 ## Izin Accessibility
 
@@ -101,7 +102,8 @@ Yang butuh izin hanyalah kemampuan mencari koordinat text field:
 3. Di **System Settings → Privacy & Security → Accessibility**, centang **CapLock**.
 4. Klik **Perbarui** di Settings untuk memastikan status berubah jadi “akses aktif”.
 
-Tanpa izin ini, CapLock tetap bekerja, tetapi badge mengikuti posisi kursor sebagai fallback.
+Tanpa izin ini, CapLock tetap bekerja, tetapi badge tidak tahu posisi text box dan akan diam
+di posisi tetap tengah atas layar — ia tidak akan mengikuti kursor.
 CapLock **tidak meminta Input Monitoring** dan tidak merekam apa pun yang Anda ketik.
 
 > Catatan: untuk keyboard dengan fitur “Caps Lock untuk ganti bahasa input”, macOS
@@ -144,7 +146,8 @@ CapLock **tidak meminta Input Monitoring** dan tidak merekam apa pun yang Anda k
 | “App cannot be opened” | `xattr -d com.apple.quarantine /Applications/CapLock.app` |
 | Auto-start gagal aktif | Pindahkan app ke `/Applications` dulu, lalu aktifkan lagi di Settings |
 | Badge tidak muncul di atas text box | Cek status Accessibility di Settings; centang CapLock lalu klik **Perbarui** |
-| Badge mengikuti kursor | Izin Accessibility belum aktif, atau belum ada text field yang fokus (default fallback) |
+| Badge tidak tepat di atas text box | Izin Accessibility belum aktif; aktifkan di Settings lalu klik **Perbarui** |
+| Badge diam di tengah atas | Belum ada text field yang terdeteksi fokus; klik sebuah text box untuk memindahkannya |
 | Status terasa telat | Durasi debounce ≈240 ms sengaja dipakai untuk menghindari kedip |
 
 ---

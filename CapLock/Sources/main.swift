@@ -360,6 +360,7 @@ final class BadgeController {
     static let shared = BadgeController()
     private var panel: NSPanel?
     private var previewTimer: Timer?
+    private var hasAnchoredFrame = false
     private let width: CGFloat = 168
     private let height: CGFloat = 35
 
@@ -395,44 +396,46 @@ final class BadgeController {
     private func place(_ panel: NSPanel) {
         let gap: CGFloat = 8
         let globalTop = NSScreen.screens.first?.frame.maxY ?? 0
-        let mouse = NSEvent.mouseLocation
 
-        // Mode 0: anchor above the focused text field (Accessibility API).
-        if P.int(P.hudPosition, 0) == 0,
-           let field = TextBoxLocator.focusedTextFieldFrame() {
-            let fieldMidCocoa = NSPoint(x: field.midX, y: globalTop - field.midY)
-            let screen = NSScreen.screens.first {
-                NSMouseInRect(fieldMidCocoa, $0.frame, false)
-            } ?? NSScreen.main ?? NSScreen.screens.first
-
-            // Top of the field, measured downward from the primary display top.
-            // In AppKit coordinates the badge bottom sits `gap` above that edge.
-            var y = globalTop - field.minY + gap
-            if let screen = screen, y + height > screen.frame.maxY - 4 {
-                // Not enough room above: flip below the field.
-                y = globalTop - field.maxY - gap - height
+        // Anchor above the focused text field and stay there. The pointer is
+        // never consulted, so moving the mouse cannot drag the badge away.
+        guard let field = TextBoxLocator.focusedTextFieldFrame() else {
+            if !hasAnchoredFrame {
+                // No field detected yet (e.g. Accessibility not granted): use a
+                // fixed neutral spot instead of following the cursor.
+                if let screen = NSScreen.main ?? NSScreen.screens.first {
+                    let x = min(max(screen.frame.midX - width / 2,
+                                    screen.frame.minX + 8),
+                                screen.frame.maxX - width - 8)
+                    let y = screen.frame.maxY - height - 44
+                    panel.setFrame(NSRect(x: x, y: y, width: width, height: height),
+                                   display: true)
+                }
             }
-            var x = field.midX - width / 2
-            if let screen = screen {
-                x = min(max(x, screen.frame.minX + 8),
-                        screen.frame.maxX - width - 8)
-                y = min(max(y, screen.frame.minY + 8),
-                        screen.frame.maxY - height - 8)
-            }
-            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
             return
         }
 
-        // Fallback: follow the pointer when permission is missing or no field
-        // is focused. Also used when the user explicitly picks "near cursor".
-        if let screen = (NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) }
-                            ?? NSScreen.main ?? NSScreen.screens.first) {
-            let x = min(max(mouse.x + 18, screen.frame.minX + 8),
-                        screen.frame.maxX - width - 8)
-            let y = min(max(mouse.y - height - 18, screen.frame.minY + 8),
-                        screen.frame.maxY - height - 8)
-            panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
+        hasAnchoredFrame = true
+        let fieldMidCocoa = NSPoint(x: field.midX, y: globalTop - field.midY)
+        let screen = NSScreen.screens.first {
+            NSMouseInRect(fieldMidCocoa, $0.frame, false)
+        } ?? NSScreen.main ?? NSScreen.screens.first
+
+        // Top of the field, measured downward from the primary display top.
+        // In AppKit coordinates the badge bottom sits `gap` above that edge.
+        var y = globalTop - field.minY + gap
+        if let screen = screen, y + height > screen.frame.maxY - 4 {
+            // Not enough room above: flip below the field.
+            y = globalTop - field.maxY - gap - height
         }
+        var x = field.midX - width / 2
+        if let screen = screen {
+            x = min(max(x, screen.frame.minX + 8),
+                    screen.frame.maxX - width - 8)
+            y = min(max(y, screen.frame.minY + 8),
+                    screen.frame.maxY - height - 8)
+        }
+        panel.setFrame(NSRect(x: x, y: y, width: width, height: height), display: true)
     }
 
     func preview() {
@@ -445,6 +448,7 @@ final class BadgeController {
 
     func hide() {
         previewTimer?.invalidate(); previewTimer = nil
+        hasAnchoredFrame = false
         guard let panel = panel else { return }
         self.panel = nil
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -464,7 +468,6 @@ struct SettingsView: View {
     @AppStorage(P.iconStyle) private var style = 0
     @AppStorage(P.iconSize) private var size = 18.0
     @AppStorage(P.showBadge) private var showBadge = true
-    @AppStorage(P.hudPosition) private var position = 0
     @AppStorage(P.playSound) private var sound = true
     @AppStorage(P.launchAtLogin) private var login = false
 
@@ -494,10 +497,9 @@ struct SettingsView: View {
 
             Section("Indikator Caps Lock aktif") {
                 Toggle("Tampilkan saat Caps Lock aktif", isOn: $showBadge)
-                Picker("Posisi indikator", selection: $position) {
-                    Text("Tepat di atas text box yang fokus").tag(0)
-                    Text("Dekat kursor").tag(1)
-                }
+                Text("Indikator selalu menempel di atas text box yang fokus dan tidak mengikuti kursor.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
                 Toggle("Bunyi suara saat berubah", isOn: $sound)
                 Button("Pratinjau indikator") {
                     BadgeController.shared.preview()
@@ -514,7 +516,7 @@ struct SettingsView: View {
                         .controlSize(.small)
                 }
                 if !trusted {
-                    Text("Izinkan CapLock di Privacy & Security › Accessibility agar indikator bisa menempel tepat di atas text box. Tanpa izin, indikator mengikuti kursor.")
+                    Text("Izinkan CapLock di Privacy & Security › Accessibility agar indikator bisa menempel tepat di atas text box. Tanpa izin, indikator diam di posisi tetap tengah atas.")
                         .font(.caption)
                         .foregroundColor(.secondary)
                     HStack {
@@ -587,6 +589,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         P.registerDefaults()
         NSApp.setActivationPolicy(.accessory)
+
+        // Placement needs Accessibility. Ask once on launch when missing so the
+        // user does not have to dig into Settings to discover the requirement.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) {
+            if !TextBoxLocator.isTrusted {
+                TextBoxLocator.requestAccess()
+            }
+        }
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         let menu = NSMenu()
