@@ -1,0 +1,19 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / OS noise
+*.swp
+*.swo
+*~
+
+# Build output inside the source folder (root CapLock.app is the shipped prebuilt copy)
+CapLock/CapLock.app/
+
+# Temporary files
+*.tmp
+*.log
+
+# Personal reference image (not part of the app)
+contoh.jpg
